@@ -351,6 +351,20 @@ for id in $IDS; do
     case "$id" in server_rsa_hundreds_servers_*) live_to=600 ;; esac
     mark
     drive "$num"
+    # Resync to THIS challenge's launcher banner before watching for "is live".
+    # "is live"/$FAIL_RE are generic (not id-specific), so without this anchor a
+    # challenge that never comes up (e.g. an arch-incompatible asset holding the
+    # launcher on its own 90s wait, plus the extra menu redisplay) would drift
+    # the driver one challenge behind the launcher, and every following
+    # challenge would time out against the wrong output until the backlog
+    # drained. The banner IS id-specific, so it realigns us each iteration.
+    # run_challenges.sh prints: [*] Starting '<id>'...
+    if ! wait_for "Starting '$id'" "$MENU_TIMEOUT" "$FAIL_RE"; then
+        failc "$id: launcher never announced 'Starting $id' (desync or menu error)"
+        wait_for "$MENU_RE" "$MENU_TIMEOUT" >/dev/null
+        continue
+    fi
+    mark # re-anchor: only count "is live"/failure printed AFTER this banner
     wait_for 'is live' $((live_to + 60)) "$FAIL_RE"
     rc=$?
     case "$rc" in
@@ -380,7 +394,10 @@ for id in $IDS; do
     if [ -z "$line" ]; then
         failc "$id: no validator reply to a wrong proof (validator unreachable?)"
     else
-        if printf '%s' "$line" | grep -q '^\[!\] validator:.*FAIL'; then
+        # No '^' anchor: the captured line can carry a leading "  > " prompt
+        # echo (seen on slower runners), which an anchored match would miss and
+        # wrongly flag as "not shown as a failure".
+        if printf '%s' "$line" | grep -q '\[!\] validator:.*FAIL'; then
             pass "$id: wrong proof shown as a failure"
         else
             fail_or_known verdict "$id: wrong proof not shown as a failure: '$line'"
@@ -388,7 +405,7 @@ for id in $IDS; do
     fi
     if [ "$MODE" = mock ]; then
         line="$(submit "$EXPECTED_SECRET")"
-        if printf '%s' "$line" | grep -q '^\[+\] validator:.*solved'; then
+        if printf '%s' "$line" | grep -q '\[+\] validator:.*solved'; then
             pass "$id: right proof shown as solved"
         else
             failc "$id: right proof not shown as solved: '$line'"
