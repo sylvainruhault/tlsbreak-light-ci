@@ -254,11 +254,18 @@ cleanup() {
 trap cleanup EXIT
 trap 'log "interrupted"; exit 130' INT TERM
 
+# Redirect the WHOLE subshell (not just run_challenges.sh) to the log: the
+# `tail -f "$CTL"` feeder can outlive run_challenges.sh (it only dies when it
+# next writes to the closed pipe and takes SIGPIPE, which may never come), and
+# if it still holds this step's stdout/stderr the CI runner never sees EOF and
+# the step hangs to its timeout even though every check already passed. With
+# the redirect here, the feeder only ever holds $RUNLOG (a file), so the step
+# ends as soon as this script exits.
 (
     cd "$RUN_DIR" || exit 1
-    tail -n +1 -f "$CTL" | bash ./run_challenges.sh >>"$RUNLOG" 2>&1
+    tail -n +1 -f "$CTL" | bash ./run_challenges.sh
     echo "$?" >"$WORK/run.rc"
-) &
+) >>"$RUNLOG" 2>&1 &
 RUN_PID=$!
 
 MARK=0

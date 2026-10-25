@@ -36,8 +36,12 @@ on:
         description: "mock: visit the first N menu entries (empty = all)"
         default: ""
       browser_first:
-        description: "browser: menu entries driven inside the workstation"
-        default: "2"
+        # Default 4 so Option B reaches the OpenSSL/Heartbleed challenge (menu
+        # #4), the one challenge that execs a per-arch vendored binary — it must
+        # be exercised on arm64/macOS/Windows Option B, not just x64. Lower it
+        # to 2 for a quicker smoke run.
+        description: "browser: menu entries driven inside the workstation (>=4 covers the openssl challenge)"
+        default: "4"
   # Weekly, even without a new bundle: catches drift in runner images,
   # Debian packages, Homebrew/colima, KasmVNC... (the workstation build has
   # broken that way before).
@@ -225,7 +229,7 @@ jobs:
       - name: Drive run_in_browser.sh
         env:
           BUILD_TIMEOUT: "10800"
-          FIRST: ${{ github.event.inputs.browser_first || '2' }}
+          FIRST: ${{ github.event.inputs.browser_first || '4' }}
         run: |
           if [ "$RUNNER_OS" = macOS ]; then sh=/bin/bash; else sh=bash; fi
           "$sh" test/ci/drive_run_in_browser.sh --bundle bundle --first "$FIRST" --log-dir logs
@@ -271,7 +275,7 @@ jobs:
       - name: Drive run_in_browser.sh inside WSL (Option B)
         shell: pwsh
         run: |
-          $env:CI_FIRST = "${{ github.event.inputs.browser_first || '2' }}"
+          $env:CI_FIRST = "${{ github.event.inputs.browser_first || '4' }}"
           $env:BUILD_TIMEOUT = "10800"
           $env:WSLENV = "CI_FIRST/u:BUILD_TIMEOUT/u"
           wsl -d Ubuntu-24.04 -u root --cd "$env:GITHUB_WORKSPACE" -- bash test/ci/wsl_browser_run.sh out/light.zip logs
