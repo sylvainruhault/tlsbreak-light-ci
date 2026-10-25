@@ -1,0 +1,235 @@
+# light-bundle: portability tests of the TLSbreak LIGHT student bundle, as
+# students on Linux (x64 + arm64), Windows (WSL2) and macOS would use it.
+#
+# NOTHING IS BUILT HERE. The light zip is built privately and published to
+# this repository's `light-bundle` release; the test scripts under test/ci/
+# are synced from the private source repository. Both are overwritten on every
+# sync: change them in the source repository, not here.
+#
+#   static     ubuntu / macos / windows    test/ci/static_checks.sh
+#   mock       ubuntu                      menu flow against a mocked docker
+#   real-linux ubuntu 22.04/24.04, x64 + arm64 (native arm64 images):
+#              Option A, run_challenges.sh on the runner's rootful Docker,
+#              whole light menu; plus a check that the light server refuses
+#              a paid challenge id
+#   real-windows windows-2022/2025: Option A inside WSL2 Ubuntu + Docker Engine
+#   browser    ubuntu x64 + arm64, macos-15-intel (colima): Option B,
+#              run_in_browser.sh builds the workstation image, then
+#              run_challenges.sh is driven inside it
+#
+# Public repository = standard runners are free, so the default scope is
+# everything. No pull_request trigger and no secrets: this only ever runs the
+# owner's own published bundle.
+name: light-bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: "quick (static + mock + ubuntu x64) | full (everything)"
+        type: choice
+        options: [full, quick]
+        default: full
+      mock_first:
+        description: "mock: visit the first N menu entries (empty = all)"
+        default: ""
+      browser_first:
+        description: "browser: menu entries driven inside the workstation"
+        default: "2"
+  # Weekly, even without a new bundle: catches drift in runner images,
+  # Debian packages, Homebrew/colima, KasmVNC... (the workstation build has
+  # broken that way before).
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: light-bundle
+  cancel-in-progress: true
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  SCOPE: ${{ github.event.inputs.scope || 'full' }}
+  # Issues the drivers report as warnings instead of failures until fixed:
+  #   keygen - the embedded Linux keygen can't run on macOS / Git Bash
+  KNOWN_ISSUES_ALL: ""
+  KNOWN_ISSUES_NON_LINUX: "keygen"
+
+jobs:
+  static:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash # Git Bash on Windows
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+      - name: Download the published bundle
+        run: gh release download light-bundle -R "$GITHUB_REPOSITORY" -D out && cat out/manifest.txt
+      - name: shellcheck (macOS)
+        if: runner.os == 'macOS'
+        run: brew install shellcheck || true
+      - name: Static checks under the default bash
+        env:
+          LIGHT_LIST: out/light_list.txt
+        run: bash test/ci/static_checks.sh out/light.zip light
+      - name: Static checks under macOS /bin/bash 3.2
+        if: runner.os == 'macOS'
+        env:
+          LIGHT_LIST: out/light_list.txt
+        run: /bin/bash test/ci/static_checks.sh out/light.zip light
+
+  mock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download the published bundle
+        run: gh release download light-bundle -R "$GITHUB_REPOSITORY" -D out && cat out/manifest.txt
+      - uses: actions/setup-python@v7
+        with: { python-version: "3.12" }
+      - name: Extract
+        run: mkdir -p bundle && unzip -q out/light.zip -d bundle
+      - name: Drive run_challenges.sh (mocked docker)
+        env:
+          KNOWN_ISSUES: ${{ env.KNOWN_ISSUES_ALL }}
+          FIRST: ${{ github.event.inputs.mock_first }}
+        run: |
+          args=(--bundle bundle --mode mock --log-dir logs)
+          [ -n "$FIRST" ] && args+=(--first "$FIRST")
+          bash test/ci/drive_run_challenges.sh "${args[@]}"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mock-logs
+          path: logs/
+          retention-days: 14
+
+  real-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON((github.event.inputs.scope || 'full') == 'quick' && '["ubuntu-24.04"]' || '["ubuntu-24.04","ubuntu-22.04","ubuntu-24.04-arm","ubuntu-22.04-arm"]') }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download the published bundle
+        run: gh release download light-bundle -R "$GITHUB_REPOSITORY" -D out && cat out/manifest.txt
+      - name: Extract
+        run: mkdir -p bundle && unzip -q out/light.zip -d bundle
+      - name: Drive run_challenges.sh (rootful Docker, whole light menu)
+        env:
+          KNOWN_ISSUES: ${{ env.KNOWN_ISSUES_ALL }}
+        run: bash test/ci/drive_run_challenges.sh --bundle bundle --mode real --log-dir logs
+      - name: Light build refuses a paid challenge id
+        run: |
+          case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64 | arm64) arch=arm64 ;; esac
+          tar="bundle/images/$arch/tls-lab-server.tar"
+          [ -f "$tar" ] || tar=bundle/images/tls-lab-server.tar
+          sudo docker load -i "$tar"
+          excluded="$(grep -vE '^\s*(#|$)' out/excluded_probe.txt | head -1 | tr -d ' ')"
+          test -n "$excluded" || { echo "::error::excluded_probe.txt is empty"; exit 1; }
+          echo "probing excluded id: $excluded"
+          out="$(timeout 30 sudo docker run --rm -e CHALLENGE_ID="$excluded" tls-lab-server:latest 2>&1 || true)"
+          echo "$out" | tail -3
+          echo "$out" | grep -q 'no server variant registered' || { echo "::error::light server accepted $excluded"; exit 1; }
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: real-logs-${{ matrix.runner }}
+          path: logs/
+          retention-days: 14
+
+  real-windows:
+    if: (github.event.inputs.scope || 'full') != 'quick'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2025, windows-2022]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    env:
+      WSL_UTF8: "1" # wsl.exe prints UTF-16 otherwise
+    steps:
+      - name: Keep LF line endings (the scripts run in bash)
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+      - name: Download the published bundle
+        shell: bash
+        run: gh release download light-bundle -R "$GITHUB_REPOSITORY" -D out && cat out/manifest.txt
+      - name: Install Ubuntu in WSL2
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          wsl --update --web-download
+          wsl --set-default-version 2
+          wsl --install -d Ubuntu-24.04 --no-launch --web-download
+          wsl -l -v
+          wsl -d Ubuntu-24.04 -u root -- uname -a
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Drive run_challenges.sh inside WSL (Docker Engine in the distro)
+        shell: pwsh
+        run: |
+          $env:KNOWN_ISSUES = $env:KNOWN_ISSUES_ALL
+          $env:WSLENV = "KNOWN_ISSUES/u"
+          wsl -d Ubuntu-24.04 -u root --cd "$env:GITHUB_WORKSPACE" -- bash test/ci/wsl_real_run.sh out/light.zip logs
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: real-logs-${{ matrix.runner }}
+          path: logs/
+          retention-days: 14
+
+  browser:
+    if: (github.event.inputs.scope || 'full') != 'quick'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download the published bundle
+        run: gh release download light-bundle -R "$GITHUB_REPOSITORY" -D out && cat out/manifest.txt
+      - name: Start colima (macOS stand-in for Docker Desktop)
+        if: runner.os == 'macOS'
+        timeout-minutes: 25
+        run: |
+          set -o pipefail
+          brew install colima docker docker-buildx qemu >/dev/null
+          # Homebrew's docker CLI has no buildx plugin; the workstation image
+          # needs BuildKit (heredocs). Docker Desktop / OrbStack bundle it.
+          mkdir -p ~/.docker/cli-plugins
+          ln -sfn "$(brew --prefix)/opt/docker-buildx/bin/docker-buildx" ~/.docker/cli-plugins/docker-buildx
+          colima start --vm-type qemu --cpu 3 --memory 8 --disk 80 --mount "$HOME:w" 2>&1 | tail -20
+          docker info --format 'engine: {{.ServerVersion}} {{.OSType}}/{{.Architecture}}'
+      - name: Extract (unzip)
+        if: runner.os == 'Linux'
+        run: mkdir -p bundle && unzip -q out/light.zip -d bundle
+      - name: Extract (ditto, as Archive Utility does)
+        if: runner.os == 'macOS'
+        run: mkdir -p bundle && ditto -x -k out/light.zip bundle
+      # macOS: /bin/bash 3.2 on purpose, it's what `#!/usr/bin/env bash` finds there.
+      - name: Drive run_in_browser.sh
+        env:
+          BUILD_TIMEOUT: "10800"
+          FIRST: ${{ github.event.inputs.browser_first || '2' }}
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then sh=/bin/bash; else sh=bash; fi
+          "$sh" test/ci/drive_run_in_browser.sh --bundle bundle --first "$FIRST" --log-dir logs
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: browser-logs-${{ matrix.runner }}
+          path: logs/
+          retention-days: 14

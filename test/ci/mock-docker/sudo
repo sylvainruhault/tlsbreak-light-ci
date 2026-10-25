@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Mock `sudo` for CI drivers: drop sudo's own options and run the command
+# as the current user (so `sudo docker ...` reaches the mock docker that
+# sits next to this file on PATH). `sudo -v` / `sudo -n true` succeed.
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -v | -k) exit 0 ;;
+    --)
+        shift
+        break
+        ;;
+    -u | -g | -C | -p) shift 2 ;;
+    -*) shift ;;
+    *) break ;;
+    esac
+done
+[ $# -eq 0 ] && exit 0
+exec "$@"

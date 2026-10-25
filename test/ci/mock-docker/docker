@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# Mock `docker` for CI runners that have no Linux-container engine
+# (macos-latest, windows-latest). Put this directory first on PATH.
+#
+# It never runs anything. It keeps a little state under $MOCK_DOCKER_STATE
+# (networks, containers, built images) and records every invocation, so the
+# CI drivers can assert on exactly what run_challenges.sh /
+# run_in_browser.sh asked Docker to do:
+#   $MOCK_DOCKER_STATE/calls.log            one line per call (argv, space-joined)
+#   $MOCK_DOCKER_STATE/runs/<name>.args     argv of the `docker run` that created <name>, one arg per line
+#   $MOCK_DOCKER_STATE/runs/<name>.identity number of *.bin files in the /run/identity mount at run time
+# Bash 3.2-compatible (macOS /bin/bash).
+set -u
+S="${MOCK_DOCKER_STATE:?MOCK_DOCKER_STATE must be set}"
+mkdir -p "$S/net" "$S/ctr" "$S/img" "$S/runs"
+printf '%s\n' "$*" >>"$S/calls.log"
+
+cmd="${1:-}"
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+load)
+    # docker load -i <tar>
+    f=""
+    while [ $# -gt 0 ]; do
+        case "$1" in -i | --input)
+            f="$2"
+            shift 2
+            ;;
+        *) shift ;; esac
+    done
+    [ -s "$f" ] || {
+        echo "open $f: no such file" >&2
+        exit 1
+    }
+    n="$(basename "$f" .tar)"
+    : >"$S/img/$n"
+    echo "Loaded image: $n:latest"
+    ;;
+network)
+    sub="${1:-}"
+    shift
+    case "$sub" in
+    inspect) [ -e "$S/net/${1:-}" ] || exit 1 ;;
+    create)
+        name=""
+        while [ $# -gt 0 ]; do
+            case "$1" in --subnet) shift 2 ;; -*) shift ;; *)
+                name="$1"
+                shift
+                ;;
+            esac
+        done
+        [ -e "$S/net/$name" ] && {
+            echo "network with name $name already exists" >&2
+            exit 1
+        }
+        : >"$S/net/$name"
+        echo "mocknet$name"
+        ;;
+    rm)
+        rc=0
+        for n in "$@"; do
+            if [ -e "$S/net/$n" ]; then
+                rm -f "$S/net/$n"
+                echo "$n"
+            else rc=1; fi
+        done
+        exit "$rc"
+        ;;
+    ls) : ;; # nothing listed -> run_challenges.sh's kill_wireshark is a no-op
+    *) : ;;
+    esac
+    ;;
+run)
+    name=""
+    detach=0
+    args_file="$(mktemp)"
+    for a in "$@"; do printf '%s\n' "$a" >>"$args_file"; done
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --name)
+            name="$2"
+            shift 2
+            ;;
+        --name=*)
+            name="${1#--name=}"
+            shift
+            ;;
+        -d)
+            detach=1
+            shift
+            ;;
+        -v)
+            case "$2" in
+            *:/run/identity*)
+                d="${2%%:/run/identity*}"
+                if [ -d "$d" ]; then
+                    n_bins="$(find "$d" -maxdepth 1 -name '*.bin' 2>/dev/null | wc -l | tr -d ' ')"
+                else
+                    n_bins=0
+                fi
+                IDENT_COUNT="$n_bins"
+                IDENT_DIR="$d"
+                ;;
+            esac
+            shift 2
+            ;;
+        *) shift ;;
+        esac
+    done
+    [ -n "$name" ] || name="anon$$"
+    [ -e "$S/ctr/$name" ] && {
+        echo "Conflict. The container name \"/$name\" is already in use" >&2
+        rm -f "$args_file"
+        exit 125
+    }
+    : >"$S/ctr/$name"
+    mv "$args_file" "$S/runs/$name.args"
+    if [ -n "${IDENT_COUNT:-}" ]; then
+        echo "$IDENT_COUNT" >"$S/runs/$name.identity"
+        echo "$IDENT_DIR" >"$S/runs/$name.identity_dir"
+    fi
+    [ "$detach" = 1 ] && echo "mock$(date +%s)$name"
+    ;;
+logs)
+    name=""
+    for a in "$@"; do case "$a" in -*) ;; [0-9]*) ;; *) name="$a" ;; esac done
+    [ -e "$S/ctr/$name" ] || {
+        echo "Error: No such container: $name" >&2
+        exit 1
+    }
+    case "$name" in
+    *server* | *validator*) echo "[$name] waiting for HPKE bootstrap (mock)" ;;
+    *) echo "[$name] mock log" ;;
+    esac
+    ;;
+rm)
+    rc=0
+    for a in "$@"; do
+        case "$a" in -*) continue ;; esac
+        if [ -e "$S/ctr/$a" ]; then
+            rm -f "$S/ctr/$a"
+            echo "$a"
+        else rc=1; fi
+    done
+    exit "$rc"
+    ;;
+ps)
+    for c in "$S"/ctr/*; do [ -e "$c" ] && basename "$c"; done
+    ;;
+inspect)
+    # docker inspect -f '{{.State.Running}}' <name>
+    name=""
+    for a in "$@"; do name="$a"; done
+    [ -e "$S/ctr/$name" ] || exit 1
+    echo true
+    ;;
+image)
+    sub="${1:-}"
+    shift
+    case "$sub" in
+    inspect)
+        name=""
+        for a in "$@"; do case "$a" in -f) ;; \{\{*) ;; *) name="$a" ;; esac done
+        key="$(printf '%s' "$name" | tr '/:' '__')"
+        [ -e "$S/img/$key" ] || exit 1
+        case " $* " in *"{{.Created}}"*) echo "2099-01-01T00:00:00Z" ;; *) echo "[]" ;; esac
+        ;;
+    *) : ;;
+    esac
+    ;;
+build)
+    tag=""
+    while [ $# -gt 0 ]; do
+        case "$1" in -t)
+            tag="$2"
+            shift 2
+            ;;
+        *) shift ;; esac
+    done
+    cat >/dev/null # Dockerfile on stdin
+    key="$(printf '%s' "$tag" | tr '/:' '__')"
+    : >"$S/img/$key"
+    echo "Successfully tagged $tag"
+    ;;
+wait)
+    name="${!#}"
+    while [ -e "$S/ctr/$name" ]; do sleep 1; done
+    echo 0
+    ;;
+exec | create | cp | save | version | info) : ;;
+*) : ;;
+esac
+exit 0
