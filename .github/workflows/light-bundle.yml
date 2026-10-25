@@ -135,18 +135,16 @@ jobs:
         env:
           KNOWN_ISSUES: ${{ env.KNOWN_ISSUES_ALL }}
         run: bash test/ci/drive_run_challenges.sh --bundle bundle --mode real --log-dir logs
-      - name: Light build refuses a paid challenge id
-        run: |
-          case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64 | arm64) arch=arm64 ;; esac
-          tar="bundle/images/$arch/tls-lab-server.tar"
-          [ -f "$tar" ] || tar=bundle/images/tls-lab-server.tar
-          sudo docker load -i "$tar"
-          excluded="$(grep -vE '^\s*(#|$)' out/excluded_probe.txt | head -1 | tr -d ' ')"
-          test -n "$excluded" || { echo "::error::excluded_probe.txt is empty"; exit 1; }
-          echo "probing excluded id: $excluded"
-          out="$(timeout 30 sudo docker run --rm -e CHALLENGE_ID="$excluded" tls-lab-server:latest 2>&1 || true)"
-          echo "$out" | tail -3
-          echo "$out" | grep -q 'no server variant registered' || { echo "::error::light server accepted $excluded"; exit 1; }
+      # NOTE: no "light build refuses a paid id" probe here. The user-facing
+      # exclusion (a paid challenge isn't offered) is already asserted by
+      # static_checks.sh ("light menu == LIGHT_LIST"). A behavioural probe is
+      # not viable: given an excluded id the server does NOT panic at startup —
+      # it blocks waiting for the HPKE bootstrap and only refuses (panics "no
+      # server variant registered") when it builds the cert AFTER a client
+      # bootstraps, so a client-less `docker run` just hangs; and a binary
+      # string-grep is unreliable (an excluded id's string can survive via a
+      # shared multi-id variant arm). Compile-time exclusion is enforced and
+      # checked by build-light.sh itself.
       - uses: actions/upload-artifact@v7
         if: always()
         with:
