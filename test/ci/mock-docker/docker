@@ -75,6 +75,8 @@ network)
 run)
     name=""
     detach=0
+    keygen_target=""   # the `--keygen <path>` container path, if this is the rotation run
+    mounts=""          # every `-v host:target` seen, newline-joined (bash 3.2: no arrays)
     args_file="$(mktemp)"
     for a in "$@"; do printf '%s\n' "$a" >>"$args_file"; done
     while [ $# -gt 0 ]; do
@@ -91,7 +93,19 @@ run)
             detach=1
             shift
             ;;
+        --keygen)
+            # The server image's rotation mode (run_challenges.sh's
+            # rotate_identity_keys): `... -v <dir>:/out <img> --keygen /out`.
+            # Mock docker never runs the real binary, so SIMULATE it below by
+            # writing the 6 identity keys into the mounted output dir — else the
+            # /run/identity mount the challenge containers get is empty and the
+            # "6 rotated *.bin keys" assertion can never pass in mock.
+            keygen_target="${2:-}"
+            shift 2
+            ;;
         -v)
+            mounts="$mounts
+$2"
             case "$2" in
             *:/run/identity*)
                 d="${2%%:/run/identity*}"
@@ -109,6 +123,25 @@ run)
         *) shift ;;
         esac
     done
+    # Simulate `--keygen <path>`: write {client,server,validator}_{priv,pub}.bin
+    # (6 files, 32 bytes each, the real X25519 key size) into the host side of
+    # the `-v host:<path>` mount whose target matches the keygen path.
+    if [ -n "$keygen_target" ]; then
+        printf '%s\n' "$mounts" | while IFS= read -r m; do
+            [ -n "$m" ] || continue
+            mhost="${m%%:*}"
+            mtarget="${m#*:}"
+            mtarget="${mtarget%%:*}"
+            if [ "$mtarget" = "$keygen_target" ] && [ -d "$mhost" ]; then
+                for role in client server validator; do
+                    for half in priv pub; do
+                        head -c 32 /dev/urandom >"$mhost/${role}_${half}.bin" 2>/dev/null ||
+                            : >"$mhost/${role}_${half}.bin"
+                    done
+                done
+            fi
+        done
+    fi
     [ -n "$name" ] || name="anon$$"
     [ -e "$S/ctr/$name" ] && {
         echo "Conflict. The container name \"/$name\" is already in use" >&2
