@@ -131,7 +131,7 @@ logs)
         exit 1
     }
     case "$name" in
-    *server* | *validator*) echo "[$name] waiting for HPKE bootstrap (mock)" ;;
+    *server* | *validator*) echo "[$name] ready" ;;
     *) echo "[$name] mock log" ;;
     esac
     ;;

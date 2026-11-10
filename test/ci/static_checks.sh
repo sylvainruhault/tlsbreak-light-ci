@@ -94,9 +94,6 @@ for s in "$B"/*.sh; do
     check "bash -n $n" bash -n "$s"
     check "$n has no CRLF" sh -c '! LC_ALL=C grep -q "$(printf "\r")" "$1"' _ "$s"
 done
-# run_challenges.sh carries a base64 payload after `exit 0` — only its
-# shell part has to be CR-free, which the loop above already covers since
-# base64 has no CR either.
 
 # --- 5. generated menu --------------------------------------------------------
 META_LINE="$(grep -m1 '^CHALLENGE_META=(' "$B/run_challenges.sh" || true)"
@@ -118,42 +115,18 @@ elif [ -n "${CHALLENGES_SH:-}" ] && [ -f "$CHALLENGES_SH" ]; then
     check "full menu == challenges.sh CHALLENGES" test "$want" = "$got"
 fi
 
-# --- 6. embedded keygen payload(s) ------------------------------------------
-# One base64 block per arch: __KEYGEN_PAYLOAD_BEGIN__ <arch> ... _END__ <arch>
-# (older single-arch bundles: everything after __KEYGEN_PAYLOAD_BELOW__).
-case "$(uname -m)" in x86_64 | amd64) HOST_ARCH=amd64 ;; aarch64 | arm64) HOST_ARCH=arm64 ;; *) HOST_ARCH=other ;; esac
-b64dec() { base64 -d 2>/dev/null || base64 -D; }
-keygen_check() { # keygen_check <label> <file>
-    check "keygen payload ($1) base64-decodes to a non-empty file" test -s "$2"
-    # ELF magic \x7fELF: a Linux binary, so record (not fail) whether THIS
-    # host can run it. On macOS / Git Bash it can't (identity rotation skipped).
-    magic="$(head -c 4 "$2" | od -An -c | tr -d ' \n')"
-    check "keygen payload ($1) is an ELF binary" test "$magic" = '177ELF'
-}
-if grep -q '^__KEYGEN_PAYLOAD_BEGIN__ ' "$B/run_challenges.sh"; then
-    for a in amd64 arm64; do
-        awk -v b="__KEYGEN_PAYLOAD_BEGIN__ $a" -v e="__KEYGEN_PAYLOAD_END__ $a" \
-            '$0==b{f=1;next} $0==e{f=0} f' "$B/run_challenges.sh" | b64dec >"$WORK/keygen-$a"
-        keygen_check "$a" "$WORK/keygen-$a"
-    done
-    KG="$WORK/keygen-$HOST_ARCH"
-else
-    PL="$(awk '/^__KEYGEN_PAYLOAD_BELOW__$/{print NR+1; exit}' "$B/run_challenges.sh")"
-    check "keygen payload marker present" test -n "$PL"
-    KG="$WORK/keygen"
-    if [ -n "$PL" ]; then
-        tail -n +"$PL" "$B/run_challenges.sh" | b64dec >"$KG"
-        keygen_check single "$KG"
-    fi
-fi
-if [ -s "$KG" ]; then
-    chmod +x "$KG" 2>/dev/null
-    if (cd "$WORK" && "$KG") >/dev/null 2>&1; then
-        echo "  INFO  keygen runs natively on this host"
-    else
-        echo "  INFO  keygen does NOT run on this host ($(uname -s)/$HOST_ARCH) — identity rotation would be skipped"
-    fi
-fi
+# --- 6. no embedded keygen payload; rotation via the server image ----------
+# The launcher used to carry a per-arch base64 keygen binary appended after
+# `exit 0` and decode-and-exec it at runtime. That shipped NO such blob now:
+# identity rotation runs the server IMAGE's own `--keygen` mode in a
+# throwaway container. Assert the blob is truly gone and the new wiring is
+# present (a security-minded audience must not find a decode-and-exec blob).
+check "no __KEYGEN_PAYLOAD__ blob in run_challenges.sh" \
+    sh -c '! grep -q "__KEYGEN_PAYLOAD" "$1"' _ "$B/run_challenges.sh"
+check "no base64-decode-and-exec of an embedded binary" \
+    sh -c '! grep -Eq "base64 -d .*KEYGEN|chmod \\+x .*KEYGEN" "$1"' _ "$B/run_challenges.sh"
+check "launcher rotates keys via the server image's --keygen mode" \
+    grep -q -- '--keygen /out' "$B/run_challenges.sh"
 
 # --- 7. exec bits after extraction (informational on Windows) -----------------
 for s in run_challenges.sh run_in_browser.sh run_wireshark.sh solve_incomplete.sh; do
@@ -167,15 +140,8 @@ done
 
 # --- 8. shellcheck, if available ----------------------------------------------
 if command -v shellcheck >/dev/null 2>&1; then
-    # run_challenges.sh: only the shell part — everything after the
-    # payload marker is base64, which shellcheck parses as garbage.
-    # The template's last line is a `# shellcheck disable=` directive aimed
-    # at the marker; give it a statement to attach to.
-    {
-        sed -e '/^__KEYGEN_PAYLOAD_BELOW__$/,$d' -e '/^__KEYGEN_PAYLOAD_BEGIN__ /,$d' "$B/run_challenges.sh"
-        echo ':'
-    } >"$WORK/run_challenges.shell.sh"
-    check "shellcheck -S error run_challenges.sh (shell part)" shellcheck -S error -s bash "$WORK/run_challenges.shell.sh"
+    # No base64 payload any more — shellcheck the whole launcher directly.
+    check "shellcheck -S error run_challenges.sh" shellcheck -S error -s bash "$B/run_challenges.sh"
     for s in run_in_browser.sh run_wireshark.sh solve_incomplete.sh; do
         [ -f "$B/$s" ] || continue
         check "shellcheck -S error $s" shellcheck -S error -s bash "$B/$s"
