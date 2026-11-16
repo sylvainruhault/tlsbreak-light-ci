@@ -75,8 +75,8 @@ network)
 run)
     name=""
     detach=0
-    keygen_target=""   # the `--keygen <path>` container path, if this is the rotation run
-    mounts=""          # every `-v host:target` seen, newline-joined (bash 3.2: no arrays)
+    keygen_target="" # the `--keygen <path>` container path, if this is the rotation run
+    mounts=""        # every `-v host:target` seen, newline-joined (bash 3.2: no arrays)
     args_file="$(mktemp)"
     for a in "$@"; do printf '%s\n' "$a" >>"$args_file"; done
     while [ $# -gt 0 ]; do
