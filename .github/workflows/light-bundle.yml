@@ -15,7 +15,13 @@
 #   real-windows windows-2022/2025: Option A inside WSL2 Ubuntu + Docker Engine
 #   browser    ubuntu x64 + arm64, macos-15-intel (colima): Option B,
 #              run_in_browser.sh builds the workstation image, then
-#              run_challenges.sh is driven inside it
+#              run_challenges.sh is driven inside it. The macos-15-intel leg
+#              is continue-on-error: it builds the workstation image under
+#              colima+QEMU full-system emulation, a ~45min load that
+#              intermittently starves the hosted runner's own agent into
+#              "lost communication with the server". That infra drop must not
+#              fail the whole workflow, so this one leg is best-effort — it
+#              still runs and uploads its logs; the ubuntu legs stay blocking.
 #   browser-windows windows-2022/2025: Option B inside WSL2 (Docker-in-WSL),
 #              the Windows student's real run_in_browser.sh path
 #
@@ -200,6 +206,10 @@ jobs:
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15-intel]
     runs-on: ${{ matrix.runner }}
+    # macos-15-intel is a known-flaky infra leg (colima+QEMU starves the runner
+    # into "lost communication"); keep it running for coverage but don't let its
+    # transient drops fail the workflow. The ubuntu legs stay blocking.
+    continue-on-error: ${{ matrix.runner == 'macos-15-intel' }}
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v7
